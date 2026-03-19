@@ -1,0 +1,1218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NearMart — Shop Local, Find Near</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+ 
+<!-- Firebase SDK (global compat builds — no module needed) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+ 
+<script>
+/* ══ FIREBASE INIT ══ */
+window.NM = {};
+ 
+const firebaseConfig = {
+  apiKey:            "AIzaSyAixqftW7W2vjFHy1aEuC6hldfqGcLTUcE",
+  authDomain:        "nearmart-292dd.firebaseapp.com",
+  projectId:         "nearmart-292dd",
+  storageBucket:     "nearmart-292dd.firebasestorage.app",
+  messagingSenderId: "644339933343",
+  appId:             "1:644339933343:web:c0954e2c03006b2f2f82aa",
+  measurementId:     "G-XR40PXZFPD"
+};
+ 
+firebase.initializeApp(firebaseConfig);
+const fbAuth = firebase.auth();
+const fbDB   = firebase.firestore();
+ 
+/* helpers */
+const _cap = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+ 
+async function _saveProfile(uid, data) {
+  try { await fbDB.collection('users').doc(uid).set(data, { merge: true }); } catch(e) {}
+}
+async function _loadProfile(uid) {
+  try { const s = await fbDB.collection('users').doc(uid).get(); return s.exists ? s.data() : null; } catch(e) { return null; }
+}
+ 
+function _fbErr(code) {
+  return ({
+    'auth/email-already-in-use'  : 'This email is already registered. Try signing in.',
+    'auth/invalid-email'         : 'Please enter a valid email address.',
+    'auth/weak-password'         : 'Password is too weak — use at least 8 characters.',
+    'auth/user-not-found'        : 'No account found with this email.',
+    'auth/wrong-password'        : 'Incorrect password. Please try again.',
+    'auth/invalid-credential'    : 'Email or password is incorrect.',
+    'auth/too-many-requests'     : 'Too many attempts. Please wait a moment.',
+    'auth/popup-closed-by-user'  : 'Google sign-in was cancelled.',
+    'auth/network-request-failed': 'Network error. Check your connection.',
+  })[code] || 'Something went wrong. Please try again.';
+}
+ 
+/* Auth state listener */
+fbAuth.onAuthStateChanged(async fbUser => {
+  if (fbUser) {
+    const p    = await _loadProfile(fbUser.uid);
+    const role = (p && p.role) ? p.role : 'buyer';
+    const name = fbUser.displayName || (p && p.name) || _cap(fbUser.email.split('@')[0]);
+    if (window.NM.onLogin) window.NM.onLogin({ name, email: fbUser.email, role, uid: fbUser.uid });
+  } else {
+    if (window.NM.onLogout) window.NM.onLogout();
+  }
+});
+ 
+/* Expose all auth functions directly on window.NM */
+window.NM.signIn = async function(email, pass) {
+  const cred = await fbAuth.signInWithEmailAndPassword(email, pass);
+  const p    = await _loadProfile(cred.user.uid);
+  return { role: (p && p.role) || 'buyer', name: cred.user.displayName || _cap(cred.user.email.split('@')[0]) };
+};
+ 
+window.NM.signUp = async function(email, pass, profileData) {
+  const cred = await fbAuth.createUserWithEmailAndPassword(email, pass);
+  await cred.user.updateProfile({ displayName: profileData.name });
+  await _saveProfile(cred.user.uid, Object.assign({}, profileData, { createdAt: Date.now() }));
+};
+ 
+window.NM.googleSignIn = async function() {
+  const provider = new firebase.auth.GoogleAuthProvider();
+  const cred     = await fbAuth.signInWithPopup(provider);
+  let p          = await _loadProfile(cred.user.uid);
+  if (!p) {
+    p = { name: cred.user.displayName, email: cred.user.email, role: 'buyer' };
+    await _saveProfile(cred.user.uid, p);
+  }
+  return { role: p.role, name: p.name };
+};
+ 
+window.NM.signOut = async function() { await fbAuth.signOut(); };
+window.NM.fbErr   = _fbErr;
+</script>
+ 
+<style>
+:root{
+  --bg:#0d0f14;--surface:#151821;--card:#1c2030;--border:#252a3a;
+  --accent:#f5a623;--accent2:#3de8a0;--accent3:#6c63ff;
+  --text:#e8eaf0;--muted:#6b7280;--danger:#ff5f6d;
+  --radius:16px;--fh:'Syne',sans-serif;--fb:'DM Sans',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--text);font-family:var(--fb);min-height:100vh;overflow-x:hidden;}
+ 
+/* PAGES */
+.page{display:none;animation:fi .3s ease;}
+.page.active{display:block;}
+@keyframes fi{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+ 
+/* NAV */
+nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:14px 32px;background:rgba(13,15,20,.92);backdrop-filter:blur(14px);border-bottom:1px solid var(--border);}
+.logo{font-family:var(--fh);font-size:1.5rem;font-weight:800;color:var(--accent);letter-spacing:-1px;cursor:pointer;}
+.logo span{color:var(--accent2);}
+.nav-links{display:flex;gap:28px;list-style:none;}
+.nav-links a{color:var(--muted);font-size:.9rem;font-weight:500;cursor:pointer;transition:color .2s;}
+.nav-links a:hover,.nav-links a.active{color:var(--text);}
+.nav-actions{display:flex;gap:10px;align-items:center;}
+.btn{padding:8px 20px;border-radius:50px;font-family:var(--fb);font-size:.85rem;font-weight:500;cursor:pointer;border:none;transition:all .2s;}
+.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text);}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent);}
+.btn-primary{background:var(--accent);color:#000;font-weight:700;}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(245,166,35,.35);}
+.cart-btn{position:relative;background:var(--card);border:1px solid var(--border);border-radius:50px;padding:8px 16px;display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text);font-size:.85rem;transition:border-color .2s;}
+.cart-btn:hover{border-color:var(--accent);}
+.cart-badge{position:absolute;top:-5px;right:-5px;background:var(--danger);color:#fff;border-radius:50%;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:.65rem;font-weight:700;transition:transform .15s;}
+.user-chip{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--border);border-radius:50px;padding:5px 14px 5px 5px;cursor:pointer;transition:border-color .2s;}
+.user-chip:hover{border-color:var(--accent);}
+.u-avatar{width:28px;height:28px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:.8rem;font-weight:800;color:#000;}
+ 
+/* HERO */
+.hero{padding:80px 32px 60px;text-align:center;background:radial-gradient(ellipse 80% 50% at 50% 0%,rgba(108,99,255,.15) 0%,transparent 70%);}
+.hero-tag{display:inline-block;margin-bottom:18px;padding:5px 16px;border-radius:50px;background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.3);color:var(--accent);font-size:.8rem;font-weight:600;letter-spacing:.5px;}
+.hero h1{font-family:var(--fh);font-size:clamp(2.4rem,6vw,4.5rem);font-weight:800;line-height:1.05;letter-spacing:-2px;margin-bottom:18px;}
+.hero h1 em{color:var(--accent);font-style:normal;}
+.hero p{color:var(--muted);font-size:1.1rem;max-width:540px;margin:0 auto 32px;line-height:1.6;}
+.hero-search{display:flex;max-width:560px;margin:0 auto 20px;background:var(--card);border:1px solid var(--border);border-radius:50px;padding:6px 6px 6px 20px;gap:8px;align-items:center;transition:border-color .2s;}
+.hero-search:focus-within{border-color:var(--accent);}
+.hero-search input{flex:1;background:none;border:none;outline:none;color:var(--text);font-family:var(--fb);font-size:.95rem;}
+.hero-search input::placeholder{color:var(--muted);}
+.hero-stats{display:flex;justify-content:center;gap:48px;margin-top:48px;flex-wrap:wrap;}
+.stat-num{font-family:var(--fh);font-size:2rem;font-weight:800;color:var(--accent2);}
+.stat-label{color:var(--muted);font-size:.8rem;margin-top:2px;}
+ 
+/* SECTIONS */
+section{padding:60px 32px;max-width:1280px;margin:0 auto;}
+.sec-hdr{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:32px;}
+.sec-title{font-family:var(--fh);font-size:1.8rem;font-weight:800;letter-spacing:-1px;}
+.sec-title span{color:var(--accent);}
+.see-all{color:var(--muted);font-size:.85rem;border-bottom:1px solid var(--border);padding-bottom:2px;cursor:pointer;transition:color .2s,border-color .2s;}
+.see-all:hover{color:var(--accent);border-color:var(--accent);}
+ 
+/* CATEGORIES */
+.cats{display:flex;gap:12px;flex-wrap:wrap;padding:0 32px;max-width:1280px;margin:0 auto 40px;}
+.cat-pill{display:flex;align-items:center;gap:8px;padding:10px 20px;border-radius:50px;background:var(--card);border:1px solid var(--border);cursor:pointer;transition:all .2s;font-size:.85rem;font-weight:500;color:var(--muted);}
+.cat-pill.active,.cat-pill:hover{background:rgba(245,166,35,.12);border-color:var(--accent);color:var(--accent);}
+ 
+/* PRODUCTS */
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px;}
+.pcard{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:transform .2s,border-color .2s,box-shadow .2s;cursor:pointer;}
+.pcard:hover{transform:translateY(-4px);border-color:rgba(245,166,35,.4);box-shadow:0 12px 40px rgba(0,0,0,.4);}
+.pimg{width:100%;height:180px;background:var(--surface);display:flex;align-items:center;justify-content:center;font-size:3.5rem;}
+.pinfo{padding:14px 16px 16px;}
+.pcat{font-size:.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent2);font-weight:600;margin-bottom:4px;}
+.pname{font-family:var(--fh);font-size:1rem;font-weight:700;margin-bottom:6px;line-height:1.3;}
+.pseller{color:var(--muted);font-size:.78rem;margin-bottom:10px;display:flex;align-items:center;gap:4px;}
+.sdot{width:6px;height:6px;border-radius:50%;background:var(--accent2);display:inline-block;}
+.pfooter{display:flex;justify-content:space-between;align-items:center;}
+.pprice{font-family:var(--fh);font-size:1.15rem;font-weight:800;color:var(--accent);}
+.prating{color:var(--muted);font-size:.78rem;}
+.add-btn{background:var(--accent);color:#000;border:none;border-radius:8px;padding:6px 14px;font-size:.8rem;font-weight:700;cursor:pointer;transition:all .2s;}
+.add-btn:hover{transform:scale(1.05);}
+ 
+/* MAP */
+.map-section{padding:60px 0;background:var(--surface);margin:40px 0;}
+.map-inner{max-width:1280px;margin:0 auto;padding:0 32px;}
+.map-container{display:grid;grid-template-columns:1fr 320px;gap:20px;height:480px;}
+#map{border-radius:var(--radius);overflow:hidden;border:1px solid var(--border);}
+.map-sb{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;overflow-y:auto;}
+.map-sb h3{font-family:var(--fh);font-size:1rem;font-weight:700;margin-bottom:14px;color:var(--accent2);}
+.sc{padding:12px;border-radius:10px;background:var(--surface);border:1px solid var(--border);margin-bottom:10px;cursor:pointer;transition:border-color .2s;}
+.sc:hover{border-color:var(--accent);}
+.sc-name{font-weight:700;font-size:.9rem;margin-bottom:2px;}
+.sc-type{color:var(--muted);font-size:.75rem;margin-bottom:4px;}
+.sc-dist{font-size:.75rem;color:var(--accent2);}
+ 
+/* TOP SELLERS */
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:18px;}
+.sbig{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;transition:all .2s;cursor:pointer;}
+.sbig:hover{border-color:var(--accent3);transform:translateY(-3px);box-shadow:0 8px 30px rgba(108,99,255,.2);}
+.savatar{width:52px;height:52px;border-radius:14px;font-size:1.6rem;display:flex;align-items:center;justify-content:center;margin-bottom:12px;}
+.sbig-name{font-family:var(--fh);font-size:1.1rem;font-weight:700;margin-bottom:2px;}
+.sbig-cat{color:var(--muted);font-size:.8rem;margin-bottom:10px;}
+.srow{display:flex;gap:16px;}
+.sst{font-size:.78rem;color:var(--muted);}
+.sst strong{color:var(--text);display:block;font-size:.9rem;}
+.verified{display:inline-flex;align-items:center;gap:4px;font-size:.72rem;color:var(--accent2);margin-top:10px;}
+ 
+/* HOW */
+.how{padding:80px 32px;text-align:center;}
+.how-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:24px;margin-top:48px;max-width:900px;margin-left:auto;margin-right:auto;}
+.how-step{padding:28px 20px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);position:relative;}
+.how-n{font-family:var(--fh);font-size:3rem;font-weight:800;color:rgba(245,166,35,.15);position:absolute;top:12px;right:16px;}
+.how-icon{font-size:2rem;margin-bottom:12px;}
+.how-title{font-family:var(--fh);font-size:1rem;font-weight:700;margin-bottom:6px;}
+.how-desc{color:var(--muted);font-size:.82rem;line-height:1.5;}
+ 
+/* AUTH */
+.auth-page{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px 16px;background:radial-gradient(ellipse 60% 60% at 50% 0%,rgba(108,99,255,.12) 0%,transparent 70%);}
+.auth-box{background:var(--surface);border:1px solid var(--border);border-radius:24px;padding:40px;width:100%;max-width:460px;}
+.auth-logo{text-align:center;margin-bottom:28px;}
+.auth-title{font-family:var(--fh);font-size:1.6rem;font-weight:800;text-align:center;margin-bottom:6px;}
+.auth-sub{color:var(--muted);font-size:.85rem;text-align:center;margin-bottom:28px;}
+.auth-sub a{color:var(--accent);cursor:pointer;}
+.fg{margin-bottom:16px;}
+.fl{font-size:.78rem;color:var(--muted);margin-bottom:6px;display:block;font-weight:600;}
+.fi{width:100%;padding:11px 14px;border-radius:12px;background:var(--card);border:1px solid var(--border);color:var(--text);font-family:var(--fb);font-size:.9rem;outline:none;transition:border-color .2s,box-shadow .2s;}
+.fi:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(245,166,35,.1);}
+.fi::placeholder{color:var(--muted);}
+.frow{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.fsel{width:100%;padding:11px 14px;border-radius:12px;background:var(--card);border:1px solid var(--border);color:var(--text);font-family:var(--fb);font-size:.9rem;outline:none;cursor:pointer;appearance:none;}
+.fsel:focus{border-color:var(--accent);}
+.auth-btn{width:100%;padding:13px;border-radius:12px;background:var(--accent);color:#000;font-weight:800;font-size:1rem;border:none;cursor:pointer;font-family:var(--fh);letter-spacing:.5px;transition:all .2s;margin-top:6px;}
+.auth-btn:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(245,166,35,.4);}
+.auth-btn:disabled{opacity:.6;cursor:not-allowed;transform:none;}
+.divider{display:flex;align-items:center;gap:12px;margin:20px 0;color:var(--muted);font-size:.8rem;}
+.divider::before,.divider::after{content:'';flex:1;height:1px;background:var(--border);}
+.soc-btn{width:100%;padding:11px;border-radius:12px;background:var(--card);border:1px solid var(--border);color:var(--text);font-family:var(--fb);font-size:.88rem;font-weight:500;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;transition:all .2s;margin-bottom:10px;}
+.soc-btn:hover{border-color:var(--accent);}
+.back-link{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:.82rem;cursor:pointer;margin-bottom:20px;transition:color .2s;border:none;background:none;font-family:var(--fb);}
+.back-link:hover{color:var(--accent);}
+.role-toggle{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:20px;}
+.role-opt{padding:14px;border-radius:12px;border:2px solid var(--border);background:var(--card);cursor:pointer;text-align:center;transition:all .2s;}
+.role-opt.active{border-color:var(--accent);background:rgba(245,166,35,.08);}
+.role-icon{font-size:1.6rem;margin-bottom:6px;}
+.role-lbl{font-size:.82rem;font-weight:600;}
+.role-dsc{font-size:.72rem;color:var(--muted);margin-top:2px;}
+.err-box{display:none;padding:11px 14px;background:rgba(255,95,109,.1);border:1px solid rgba(255,95,109,.3);border-radius:10px;color:var(--danger);font-size:.83rem;margin-bottom:12px;}
+.sb{height:4px;border-radius:2px;margin-top:6px;background:var(--border);overflow:hidden;}
+.sbf{height:100%;border-radius:2px;transition:width .3s,background .3s;width:0;}
+.hint{font-size:.72rem;color:var(--muted);margin-top:4px;}
+.terms{color:var(--muted);font-size:.72rem;text-align:center;margin-top:14px;line-height:1.6;}
+.terms a{color:var(--accent);cursor:pointer;}
+ 
+/* SELL */
+.sell-wrap{padding:60px 32px;max-width:960px;margin:0 auto;}
+.feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:40px;}
+.feat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;}
+.feat-icon{font-size:2rem;margin-bottom:10px;}
+.feat-title{font-family:var(--fh);font-weight:700;margin-bottom:6px;}
+.feat-desc{color:var(--muted);font-size:.85rem;line-height:1.5;}
+.cta-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:40px;text-align:center;}
+ 
+/* DASHBOARD */
+.dash-wrap{padding:40px 32px;max-width:1100px;margin:0 auto;}
+.dash-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;flex-wrap:wrap;gap:16px;}
+.dash-title{font-family:var(--fh);font-size:1.8rem;font-weight:800;}
+.dash-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:32px;}
+.dstat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;}
+.dstat-val{font-family:var(--fh);font-size:1.8rem;font-weight:800;color:var(--accent);}
+.dstat-lbl{color:var(--muted);font-size:.8rem;margin-top:4px;}
+.dstat-trend{font-size:.75rem;color:var(--accent2);margin-top:6px;}
+.sell-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px;margin-bottom:20px;}
+.sc-title{font-family:var(--fh);font-size:1.1rem;font-weight:800;margin-bottom:20px;display:flex;align-items:center;gap:8px;}
+.sc-title span{color:var(--accent);}
+.price-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;}
+.img-up{border:2px dashed var(--border);border-radius:12px;padding:36px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:16px;}
+.img-up:hover{border-color:var(--accent);background:rgba(245,166,35,.04);}
+.ltbl{width:100%;border-collapse:collapse;}
+.ltbl th{font-family:var(--fh);font-size:.78rem;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);padding:10px 14px;text-align:left;border-bottom:1px solid var(--border);}
+.ltbl td{padding:12px 14px;border-bottom:1px solid rgba(37,42,58,.5);font-size:.88rem;}
+.ltbl tr:hover td{background:rgba(255,255,255,.02);}
+.sp{padding:3px 10px;border-radius:50px;font-size:.72rem;font-weight:700;}
+.sp-a{background:rgba(61,232,160,.1);color:var(--accent2);}
+.sp-p{background:rgba(245,166,35,.1);color:var(--accent);}
+.act-btn{padding:5px 12px;border-radius:6px;font-size:.75rem;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--muted);transition:all .2s;}
+.act-btn:hover{border-color:var(--danger);color:var(--danger);}
+ 
+/* CART */
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;backdrop-filter:blur(4px);}
+.overlay.open{display:flex;align-items:flex-end;justify-content:flex-end;}
+.cart-panel{width:380px;height:100vh;background:var(--surface);border-left:1px solid var(--border);padding:24px;display:flex;flex-direction:column;gap:16px;overflow-y:auto;}
+.cart-hdr{display:flex;justify-content:space-between;align-items:center;}
+.cart-title{font-family:var(--fh);font-size:1.3rem;font-weight:800;}
+.close-btn{background:var(--card);border:1px solid var(--border);color:var(--text);width:34px;height:34px;border-radius:8px;cursor:pointer;font-size:1.1rem;display:flex;align-items:center;justify-content:center;}
+.ci{display:flex;gap:12px;padding:12px;background:var(--card);border:1px solid var(--border);border-radius:10px;align-items:center;}
+.ci-icon{font-size:2rem;min-width:48px;text-align:center;}
+.ci-name{font-weight:600;font-size:.9rem;}
+.ci-price{color:var(--accent);font-weight:700;font-size:.85rem;}
+.ci-rm{margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;}
+.ci-rm:hover{color:var(--danger);}
+.cart-total{margin-top:auto;padding-top:16px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-family:var(--fh);font-size:1.1rem;font-weight:800;}
+.cart-total span:last-child{color:var(--accent);}
+.co-btn{width:100%;padding:14px;border-radius:12px;background:var(--accent);color:#000;font-weight:800;font-size:1rem;border:none;cursor:pointer;font-family:var(--fh);transition:all .2s;}
+.co-btn:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(245,166,35,.4);}
+.empty-cart{text-align:center;color:var(--muted);margin:auto;}
+.empty-cart div{font-size:3rem;margin-bottom:12px;}
+ 
+/* PAYMENT */
+.pay-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:300;align-items:center;justify-content:center;}
+.pay-overlay.open{display:flex;}
+.pay-panel{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:32px;width:420px;max-width:95vw;max-height:90vh;overflow-y:auto;}
+.pay-title{font-family:var(--fh);font-size:1.4rem;font-weight:800;margin-bottom:6px;}
+.pay-sub{color:var(--muted);font-size:.85rem;margin-bottom:24px;}
+.pay-methods{display:flex;gap:10px;margin-bottom:20px;}
+.pay-m{flex:1;padding:12px;border-radius:10px;background:var(--card);border:2px solid var(--border);text-align:center;cursor:pointer;transition:all .2s;font-size:.8rem;}
+.pay-m.active{border-color:var(--accent);background:rgba(245,166,35,.08);}
+.pay-m .pm-icon{font-size:1.5rem;display:block;margin-bottom:4px;}
+.pay-actions{display:flex;gap:10px;margin-top:20px;}
+.ok-msg{text-align:center;padding:20px;}
+.ok-icon{font-size:3.5rem;margin-bottom:12px;}
+.ok-title{font-family:var(--fh);font-size:1.3rem;font-weight:800;color:var(--accent2);margin-bottom:6px;}
+.ok-sub{color:var(--muted);font-size:.85rem;}
+ 
+/* FOOTER */
+footer{background:var(--surface);border-top:1px solid var(--border);padding:48px 32px 24px;margin-top:60px;}
+.fg-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:32px;max-width:1280px;margin:0 auto 40px;}
+.fg-brand p{color:var(--muted);font-size:.85rem;margin-top:10px;line-height:1.6;max-width:220px;}
+.fg-col h4{font-family:var(--fh);font-size:.9rem;font-weight:700;margin-bottom:14px;}
+.fg-col a{display:block;color:var(--muted);font-size:.82rem;margin-bottom:8px;cursor:pointer;transition:color .2s;}
+.fg-col a:hover{color:var(--accent);}
+.fg-bot{text-align:center;color:var(--muted);font-size:.78rem;border-top:1px solid var(--border);padding-top:20px;max-width:1280px;margin:0 auto;}
+ 
+/* TOAST */
+.toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--card);border:1px solid var(--border);border-radius:50px;padding:12px 24px;font-size:.88rem;font-weight:600;z-index:9999;transition:transform .3s ease;white-space:nowrap;box-shadow:0 8px 32px rgba(0,0,0,.5);}
+.toast.show{transform:translateX(-50%) translateY(0);}
+.toast.success{border-color:var(--accent2);color:var(--accent2);}
+.toast.error{border-color:var(--danger);color:var(--danger);}
+ 
+@media(max-width:768px){
+  nav{padding:12px 16px;} .nav-links{display:none;}
+  .hero{padding:50px 16px 40px;} section{padding:40px 16px;}
+  .cats{padding:0 16px;}
+  .map-container{grid-template-columns:1fr;height:auto;} .map-sb{height:260px;} #map{height:300px;}
+  .fg-grid{grid-template-columns:1fr 1fr;}
+  .cart-panel{width:100vw;}
+  .sell-wrap,.dash-wrap{padding:40px 16px;}
+  .price-row,.frow{grid-template-columns:1fr;}
+  .dash-stats{grid-template-columns:1fr 1fr;}
+}
+</style>
+</head>
+<body>
+ 
+<!-- ══════════ NAVBAR ══════════ -->
+<nav>
+  <div class="logo" onclick="showPage('home')">Near<span>Mart</span></div>
+  <ul class="nav-links">
+    <li><a id="navHome" class="active" onclick="showPage('home')">Explore</a></li>
+    <li><a id="navSellers" onclick="goTo('sellers')">Sellers</a></li>
+    <li><a id="navMap" onclick="goTo('map')">Map</a></li>
+    <li><a id="navSell" onclick="showPage('sell')">Sell Here</a></li>
+  </ul>
+  <div class="nav-actions" id="navActions">
+    <button class="btn btn-ghost" onclick="showPage('signin')">Sign In</button>
+    <button class="btn btn-primary" onclick="showPage('signup')">Create Account</button>
+    <div class="cart-btn" onclick="toggleCart()">🛒 Cart<span class="cart-badge" id="cartBadge">0</span></div>
+  </div>
+</nav>
+ 
+<!-- ══════════ HOME PAGE ══════════ -->
+<div class="page active" id="page-home">
+  <div class="hero">
+    <div class="hero-tag">📍 Discover local sellers near you</div>
+    <h1>Buy & Sell<br><em>Right Around</em><br>Your Corner</h1>
+    <p>Connect with verified local sellers, browse fresh products, and get what you need from your neighbourhood.</p>
+    <div class="hero-search">
+      <span>🔍</span>
+      <input type="text" id="searchInput" placeholder="Search products, sellers, categories…" oninput="filterProducts()">
+      <button class="btn btn-primary" style="white-space:nowrap" onclick="filterProducts()">Search</button>
+    </div>
+    <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:16px;">
+      <button class="btn btn-ghost" onclick="showPage('signup')">🚀 Get Started Free</button>
+      <button class="btn btn-ghost" onclick="showPage('sell')">🏪 Start Selling</button>
+    </div>
+    <div class="hero-stats">
+      <div class="stat"><div class="stat-num">2.4k+</div><div class="stat-label">Local Sellers</div></div>
+      <div class="stat"><div class="stat-num">18k+</div><div class="stat-label">Products Listed</div></div>
+      <div class="stat"><div class="stat-num">94%</div><div class="stat-label">Happy Buyers</div></div>
+      <div class="stat"><div class="stat-num">50+</div><div class="stat-label">Categories</div></div>
+    </div>
+  </div>
+ 
+  <!-- WELCOME BANNER — shown after login/signup -->
+  <div id="welcomeBanner" style="display:none;max-width:1280px;margin:0 auto;padding:24px 32px 0;">
+    <div style="background:linear-gradient(135deg,rgba(245,166,35,.13) 0%,rgba(61,232,160,.07) 100%);border:1px solid rgba(245,166,35,.35);border-radius:20px;padding:20px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;animation:fi .5s ease;position:relative;overflow:hidden;">
+      <!-- glow blob -->
+      <div style="position:absolute;right:-40px;top:-40px;width:180px;height:180px;background:radial-gradient(circle,rgba(245,166,35,.15) 0%,transparent 70%);pointer-events:none;"></div>
+      <!-- avatar circle -->
+      <div id="wbAvatar" style="width:52px;height:52px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:1.2rem;font-weight:900;color:#000;flex-shrink:0;border:3px solid rgba(245,166,35,.5);box-shadow:0 0 20px rgba(245,166,35,.35);"></div>
+      <!-- text -->
+      <div style="flex:1;min-width:180px;">
+        <div id="wbTitle" style="font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:800;margin-bottom:3px;"></div>
+        <div id="wbSub" style="color:var(--muted);font-size:.82rem;line-height:1.4;"></div>
+      </div>
+      <!-- badge + close -->
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <div id="wbBadge" style="padding:5px 14px;border-radius:50px;font-size:.75rem;font-weight:700;"></div>
+        <button onclick="document.getElementById('welcomeBanner').style.display='none'" style="background:rgba(255,255,255,.07);border:1px solid var(--border);color:var(--muted);cursor:pointer;font-size:.85rem;padding:5px 10px;border-radius:8px;transition:color .2s;" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">✕ Dismiss</button>
+      </div>
+    </div>
+  </div>
+ 
+  <div class="cats" id="catsRow">
+    <div class="cat-pill active" onclick="filterCat('all',this)">🛍️ All</div>
+    <div class="cat-pill" onclick="filterCat('food',this)">🍎 Food & Grocery</div>
+    <div class="cat-pill" onclick="filterCat('fashion',this)">👗 Fashion</div>
+    <div class="cat-pill" onclick="filterCat('electronics',this)">📱 Electronics</div>
+    <div class="cat-pill" onclick="filterCat('home',this)">🏠 Home & Living</div>
+    <div class="cat-pill" onclick="filterCat('beauty',this)">💄 Beauty</div>
+    <div class="cat-pill" onclick="filterCat('sports',this)">⚽ Sports</div>
+    <div class="cat-pill" onclick="filterCat('crafts',this)">🎨 Crafts & Art</div>
+  </div>
+ 
+  <section>
+    <div class="sec-hdr">
+      <h2 class="sec-title">Featured <span>Products</span></h2>
+      <span class="see-all">See all →</span>
+    </div>
+    <div class="pgrid" id="productGrid"></div>
+  </section>
+ 
+  <div class="map-section" id="mapSection">
+    <div class="map-inner">
+      <div style="margin-bottom:24px;">
+        <h2 class="sec-title" style="font-family:'Syne',sans-serif;font-size:1.8rem;font-weight:800;letter-spacing:-1px;">Sellers <span style="color:var(--accent)">Near You</span></h2>
+        <p style="color:var(--muted);font-size:.85rem;margin-top:4px;">Browse local sellers on the map. Click a pin for details.</p>
+      </div>
+      <div class="map-container">
+        <div id="map"></div>
+        <div class="map-sb"><h3>📍 Nearby Sellers</h3><div id="sellerList"></div></div>
+      </div>
+    </div>
+  </div>
+ 
+  <section id="sellersSection">
+    <div class="sec-hdr">
+      <h2 class="sec-title">Top <span>Sellers</span></h2>
+      <span class="see-all">Browse all →</span>
+    </div>
+    <div class="sgrid" id="sellersGrid"></div>
+  </section>
+ 
+  <div class="how">
+    <div class="hero-tag">Simple process</div>
+    <h2 class="sec-title" style="font-family:'Syne',sans-serif;font-size:2rem;font-weight:800;letter-spacing:-1px;margin-top:12px;">How <span style="color:var(--accent)">NearMart</span> Works</h2>
+    <div class="how-grid">
+      <div class="how-step"><div class="how-n">01</div><div class="how-icon">📍</div><div class="how-title">Share Location</div><div class="how-desc">Allow location access to see sellers near you on the live map.</div></div>
+      <div class="how-step"><div class="how-n">02</div><div class="how-icon">🛍️</div><div class="how-title">Browse & Pick</div><div class="how-desc">Explore products by category and add favourites to cart.</div></div>
+      <div class="how-step"><div class="how-n">03</div><div class="how-icon">💳</div><div class="how-title">Pay Securely</div><div class="how-desc">Pay with card, MoMo, or cash on delivery — safely.</div></div>
+      <div class="how-step"><div class="how-n">04</div><div class="how-icon">🚀</div><div class="how-title">Get Delivered</div><div class="how-desc">Pickup nearby or get it delivered by the local seller.</div></div>
+    </div>
+  </div>
+ 
+  <footer>
+    <div class="fg-grid">
+      <div class="fg-brand">
+        <div class="logo" style="cursor:default">Near<span>Mart</span></div>
+        <p>Your neighbourhood marketplace. Buy from and sell to people around you.</p>
+      </div>
+      <div class="fg-col"><h4>Company</h4><a>About Us</a><a>Careers</a><a>Blog</a><a>Press</a></div>
+      <div class="fg-col"><h4>Support</h4><a>Help Centre</a><a>Safety Tips</a><a>Report Abuse</a><a>Contact</a></div>
+      <div class="fg-col"><h4>Legal</h4><a>Privacy Policy</a><a>Terms of Use</a><a>Cookie Policy</a><a>Seller Terms</a></div>
+    </div>
+    <div class="fg-bot">© 2025 NearMart. All rights reserved. Made with ❤️ for local communities.</div>
+  </footer>
+</div>
+ 
+<!-- ══════════ SIGN IN PAGE ══════════ -->
+<div class="page" id="page-signin">
+  <div class="auth-page">
+    <div class="auth-box">
+      <button class="back-link" onclick="showPage('home')">← Back to NearMart</button>
+      <div class="auth-logo"><div class="logo" style="cursor:default;font-size:1.8rem;display:inline-block">Near<span>Mart</span></div></div>
+      <div class="auth-title">Welcome back 👋</div>
+      <div class="auth-sub">Don't have an account? <a onclick="showPage('signup')">Create one free</a></div>
+ 
+      <button class="soc-btn" onclick="doGoogleSignIn()">🌐 &nbsp; Continue with Google</button>
+      <div class="divider">or sign in with email</div>
+ 
+      <div class="fg">
+        <label class="fl">Email Address</label>
+        <input class="fi" type="email" id="siEmail" placeholder="you@example.com" autocomplete="email">
+      </div>
+      <div class="fg">
+        <label class="fl" style="display:flex;justify-content:space-between;">
+          Password
+          <a style="color:var(--accent);font-weight:normal;cursor:pointer;" onclick="toast('Password reset — coming soon!','success')">Forgot password?</a>
+        </label>
+        <div style="position:relative;">
+          <input class="fi" type="password" id="siPass" placeholder="••••••••" autocomplete="current-password" style="padding-right:44px;">
+          <button onclick="toggleVis('siPass',this)" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;">👁</button>
+        </div>
+      </div>
+ 
+      <div class="err-box" id="siErr"></div>
+      <button class="auth-btn" id="siBtn" onclick="doSignIn()">Sign In →</button>
+ 
+      <div class="terms">By signing in you agree to our <a>Terms of Service</a> and <a>Privacy Policy</a></div>
+      <div style="text-align:center;margin-top:20px;padding-top:20px;border-top:1px solid var(--border);">
+        <span style="color:var(--muted);font-size:.82rem;">Want to sell? </span>
+        <a style="color:var(--accent);cursor:pointer;font-size:.82rem;font-weight:600;" onclick="showPage('signup');selectRole('seller')">Create a Seller Account →</a>
+      </div>
+      <div style="margin-top:14px;padding:10px 14px;background:rgba(61,232,160,.06);border:1px solid rgba(61,232,160,.2);border-radius:10px;font-size:.75rem;color:var(--accent2);">
+        🔐 Powered by Firebase — your login is secure and persistent.
+      </div>
+    </div>
+  </div>
+</div>
+ 
+<!-- ══════════ CREATE ACCOUNT PAGE ══════════ -->
+<div class="page" id="page-signup">
+  <div class="auth-page">
+    <div class="auth-box" style="max-width:500px;">
+      <button class="back-link" onclick="showPage('home')">← Back to NearMart</button>
+      <div class="auth-logo"><div class="logo" style="cursor:default;font-size:1.8rem;display:inline-block">Near<span>Mart</span></div></div>
+      <div class="auth-title">Create your account</div>
+      <div class="auth-sub">Already have one? <a onclick="showPage('signin')">Sign in here</a></div>
+ 
+      <div style="margin-bottom:20px;">
+        <div class="fl" style="margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px;">I want to…</div>
+        <div class="role-toggle">
+          <div class="role-opt active" id="roleBuyer" onclick="selectRole('buyer')">
+            <div class="role-icon">🛍️</div><div class="role-lbl">Buy Products</div><div class="role-dsc">Shop from local sellers</div>
+          </div>
+          <div class="role-opt" id="roleSeller" onclick="selectRole('seller')">
+            <div class="role-icon">🏪</div><div class="role-lbl">Sell Products</div><div class="role-dsc">List &amp; manage my shop</div>
+          </div>
+        </div>
+      </div>
+ 
+      <div class="frow">
+        <div class="fg"><label class="fl">First Name *</label><input class="fi" type="text" id="suFirst" placeholder="Kofi" autocomplete="given-name"></div>
+        <div class="fg"><label class="fl">Last Name *</label><input class="fi" type="text" id="suLast" placeholder="Mensah" autocomplete="family-name"></div>
+      </div>
+      <div class="fg"><label class="fl">Email Address *</label><input class="fi" type="email" id="suEmail" placeholder="you@example.com" autocomplete="email"></div>
+      <div class="fg"><label class="fl">Phone Number *</label><input class="fi" type="tel" id="suPhone" placeholder="+233 24 000 0000" autocomplete="tel"></div>
+ 
+      <div id="sellerFields" style="display:none;border-top:1px solid var(--border);padding-top:18px;margin-top:4px;">
+        <div style="padding:12px;background:rgba(61,232,160,.06);border:1px solid rgba(61,232,160,.2);border-radius:10px;margin-bottom:16px;font-size:.8rem;color:var(--accent2);">🏪 <strong>Seller account</strong> — List products &amp; get discovered by nearby buyers.</div>
+        <div class="fg"><label class="fl">Shop / Business Name *</label><input class="fi" type="text" id="suShop" placeholder="e.g. Kofi's Fresh Farm"></div>
+        <div class="fg">
+          <label class="fl">Product Category *</label>
+          <select class="fsel" id="suCat">
+            <option value="">Select a category…</option>
+            <option>Food &amp; Grocery</option><option>Fashion &amp; Clothing</option>
+            <option>Electronics</option><option>Beauty &amp; Health</option>
+            <option>Home &amp; Living</option><option>Sports &amp; Fitness</option>
+            <option>Art &amp; Crafts</option><option>Other</option>
+          </select>
+        </div>
+        <div class="fg"><label class="fl">Location / Area *</label><input class="fi" type="text" id="suLoc" placeholder="e.g. Accra, Kumasi…"></div>
+      </div>
+ 
+      <div style="border-top:1px solid var(--border);padding-top:18px;margin-top:4px;">
+        <div class="fg">
+          <label class="fl">Password *</label>
+          <div style="position:relative;">
+            <input class="fi" type="password" id="suPass" placeholder="Minimum 8 characters" oninput="checkStrength(this.value)" autocomplete="new-password" style="padding-right:44px;">
+            <button onclick="toggleVis('suPass',this)" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;">👁</button>
+          </div>
+          <div class="sb"><div class="sbf" id="sbFill"></div></div>
+          <div class="hint" id="sbHint">Enter a password</div>
+        </div>
+        <div class="fg">
+          <label class="fl">Confirm Password *</label>
+          <div style="position:relative;">
+            <input class="fi" type="password" id="suConf" placeholder="Re-enter your password" autocomplete="new-password" style="padding-right:44px;">
+            <button onclick="toggleVis('suConf',this)" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;">👁</button>
+          </div>
+        </div>
+      </div>
+ 
+      <div class="err-box" id="suErr"></div>
+      <button class="auth-btn" id="suBtn" onclick="doSignUp()">Create Account →</button>
+      <div class="terms">By creating an account you agree to our <a>Terms of Service</a>, <a>Privacy Policy</a> and <a>Seller Guidelines</a>.</div>
+    </div>
+  </div>
+</div>
+ 
+<!-- ══════════ SELL PAGE ══════════ -->
+<div class="page" id="page-sell">
+  <div id="sellLanding">
+    <div class="sell-wrap">
+      <button class="back-link" onclick="showPage('home')">← Back to NearMart</button>
+      <div style="margin-bottom:40px;">
+        <div class="hero-tag" style="margin-bottom:16px;">🏪 Become a Seller</div>
+        <h1 style="font-family:'Syne',sans-serif;font-size:2.4rem;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">Start Selling on<br><span style="color:var(--accent)">NearMart</span></h1>
+        <p style="color:var(--muted);font-size:.95rem;line-height:1.6;">Reach thousands of buyers in your area. List products, manage orders, grow your local business.</p>
+      </div>
+      <div class="feat-grid">
+        <div class="feat-card"><div class="feat-icon">📍</div><div class="feat-title">Local Reach</div><div class="feat-desc">Get discovered by buyers searching near them on the interactive map.</div></div>
+        <div class="feat-card"><div class="feat-icon">💳</div><div class="feat-title">Easy Payments</div><div class="feat-desc">Accept card, MoMo, or cash. Instant payouts to your wallet or bank.</div></div>
+        <div class="feat-card"><div class="feat-icon">📊</div><div class="feat-title">Sales Dashboard</div><div class="feat-desc">Track orders, revenue, and product performance from one place.</div></div>
+        <div class="feat-card"><div class="feat-icon">✅</div><div class="feat-title">Verified Badge</div><div class="feat-desc">Get a verified badge that builds buyer trust and boosts visibility.</div></div>
+      </div>
+      <div class="cta-box">
+        <div style="font-size:3rem;margin-bottom:12px;">🚀</div>
+        <h3 style="font-family:'Syne',sans-serif;font-size:1.4rem;font-weight:800;margin-bottom:8px;">Ready to start?</h3>
+        <p style="color:var(--muted);font-size:.9rem;margin-bottom:24px;line-height:1.6;">Create a free seller account and list your first product in minutes. No setup fees.</p>
+        <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+          <button class="auth-btn" style="width:auto;padding:13px 32px;" onclick="showPage('signup');selectRole('seller')">Create Seller Account →</button>
+          <button class="btn btn-ghost" style="padding:13px 24px;" onclick="showPage('signin')">I already have an account</button>
+        </div>
+      </div>
+    </div>
+  </div>
+ 
+  <div id="sellDashboard" style="display:none;">
+    <div class="dash-wrap">
+      <div class="dash-hdr">
+        <div>
+          <div class="dash-title">Seller Dashboard 📊</div>
+          <div id="dashWelcome" style="color:var(--muted);font-size:.85rem;margin-top:4px;">Welcome back!</div>
+        </div>
+        <div style="display:flex;gap:10px;">
+          <button class="btn btn-ghost" onclick="showPage('home')">← Browse Market</button>
+          <button class="btn btn-primary" onclick="toggleListingForm()">+ New Listing</button>
+        </div>
+      </div>
+      <div class="dash-stats">
+        <div class="dstat"><div class="dstat-val">GH₵ 3,240</div><div class="dstat-lbl">Total Revenue</div><div class="dstat-trend">↑ 12% this week</div></div>
+        <div class="dstat"><div class="dstat-val">47</div><div class="dstat-lbl">Orders</div><div class="dstat-trend">↑ 5 new today</div></div>
+        <div class="dstat"><div class="dstat-val" id="listingCount">3</div><div class="dstat-lbl">Active Listings</div><div class="dstat-trend">2 pending review</div></div>
+        <div class="dstat"><div class="dstat-val">4.8 ★</div><div class="dstat-lbl">Avg. Rating</div><div class="dstat-trend">38 reviews</div></div>
+      </div>
+ 
+      <div id="listingFormWrap" style="display:none;">
+        <div class="sell-card">
+          <div class="sc-title">📦 <span>New Product Listing</span></div>
+          <div class="frow">
+            <div class="fg"><label class="fl">Product Name</label><input class="fi" id="lpName" placeholder="e.g. Fresh Tomatoes (1kg)"></div>
+            <div class="fg"><label class="fl">Category</label>
+              <select class="fsel" id="lpCat"><option>Food &amp; Grocery</option><option>Fashion</option><option>Electronics</option><option>Beauty</option><option>Home &amp; Living</option><option>Sports</option><option>Crafts</option></select>
+            </div>
+          </div>
+          <div class="fg"><label class="fl">Description</label><input class="fi" id="lpDesc" placeholder="Describe your product…"></div>
+          <div class="price-row">
+            <div class="fg"><label class="fl">Price (GH₵)</label><input class="fi" type="number" id="lpPrice" placeholder="0.00"></div>
+            <div class="fg"><label class="fl">Stock Qty</label><input class="fi" type="number" id="lpStock" placeholder="0"></div>
+            <div class="fg"><label class="fl">Delivery</label>
+              <select class="fsel" id="lpDelivery"><option>Pickup Only</option><option>Delivery Available</option><option>Both</option></select>
+            </div>
+          </div>
+          <div class="img-up" onclick="toast('📷 Image upload — connect Firebase Storage here!','success')">
+            <div style="font-size:2.5rem;margin-bottom:10px;">📷</div>
+            <p><strong>Click to upload</strong> product photos</p>
+            <p style="margin-top:4px;font-size:.75rem;color:var(--muted);">PNG, JPG up to 5MB · Up to 5 images</p>
+          </div>
+          <div style="display:flex;gap:12px;justify-content:flex-end;">
+            <button class="btn btn-ghost" onclick="toggleListingForm()">Cancel</button>
+            <button class="btn btn-primary" onclick="submitListing()">Submit Listing →</button>
+          </div>
+        </div>
+      </div>
+ 
+      <div class="sell-card">
+        <div class="sc-title">📋 <span>Your Listings</span></div>
+        <div style="overflow-x:auto;">
+          <table class="ltbl">
+            <thead><tr><th>Product</th><th>Category</th><th>Price</th><th>Stock</th><th>Delivery</th><th>Status</th><th>Action</th></tr></thead>
+            <tbody id="listingBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+ 
+<!-- CART -->
+<div class="overlay" id="cartOverlay" onclick="toggleCart()">
+  <div class="cart-panel" onclick="event.stopPropagation()">
+    <div class="cart-hdr">
+      <div class="cart-title">Your Cart 🛒</div>
+      <button class="close-btn" onclick="toggleCart()">✕</button>
+    </div>
+    <div id="cartItems"></div>
+    <div class="cart-total" id="cartTotal" style="display:none"><span>Total</span><span id="totalPrice">GH₵ 0.00</span></div>
+    <button class="co-btn" id="checkoutBtn" onclick="openPayment()" style="display:none">Proceed to Payment →</button>
+  </div>
+</div>
+ 
+<!-- PAYMENT -->
+<div class="pay-overlay" id="payOverlay">
+  <div class="pay-panel" id="payPanel"></div>
+</div>
+ 
+<!-- TOAST -->
+<div class="toast" id="toastEl"></div>
+ 
+<!-- ══════════ MAIN SCRIPT (plain — all functions on window) ══════════ -->
+<script>
+/* ══ DATA ══ */
+const PRODUCTS = [
+  {id:1,name:"Fresh Tomatoes",cat:"food",seller:"Mama Adwoa's Farm",price:12,icon:"🍅",rating:"4.8 ★",dist:"0.3km"},
+  {id:2,name:"Ankara Dress",cat:"fashion",seller:"Kente Queen Designs",price:95,icon:"👗",rating:"4.9 ★",dist:"0.7km"},
+  {id:3,name:"Samsung Earbuds",cat:"electronics",seller:"TechHub Accra",price:220,icon:"🎧",rating:"4.7 ★",dist:"1.1km"},
+  {id:4,name:"Shea Butter Cream",cat:"beauty",seller:"Nana's Naturals",price:35,icon:"🧴",rating:"5.0 ★",dist:"0.5km"},
+  {id:5,name:"Wooden Coffee Table",cat:"home",seller:"Artisan Furniture Co.",price:480,icon:"🪑",rating:"4.6 ★",dist:"2.0km"},
+  {id:6,name:"Football Boots",cat:"sports",seller:"Champions Sports",price:150,icon:"👟",rating:"4.5 ★",dist:"1.4km"},
+  {id:7,name:"Woven Basket",cat:"crafts",seller:"Heritage Crafts GH",price:55,icon:"🧺",rating:"4.8 ★",dist:"0.9km"},
+  {id:8,name:"Grilled Tilapia",cat:"food",seller:"Aboabo Fish Market",price:28,icon:"🐟",rating:"4.9 ★",dist:"0.2km"},
+  {id:9,name:"Men's Dashiki",cat:"fashion",seller:"Kente Queen Designs",price:75,icon:"👘",rating:"4.7 ★",dist:"0.7km"},
+  {id:10,name:"Phone Charger 65W",cat:"electronics",seller:"TechHub Accra",price:45,icon:"🔌",rating:"4.6 ★",dist:"1.1km"},
+  {id:11,name:"Scented Candle Set",cat:"home",seller:"Glow & Co.",price:60,icon:"🕯️",rating:"4.8 ★",dist:"0.6km"},
+  {id:12,name:"Avocados (6 pack)",cat:"food",seller:"Green Valley Farm",price:18,icon:"🥑",rating:"4.9 ★",dist:"1.8km"},
+];
+const SELLERS = [
+  {name:"Mama Adwoa's Farm",cat:"Food & Grocery",icon:"🌾",products:34,rating:"4.8",sales:"1.2k"},
+  {name:"Kente Queen Designs",cat:"Fashion & Clothing",icon:"👑",products:78,rating:"4.9",sales:"3.4k"},
+  {name:"TechHub Accra",cat:"Electronics",icon:"⚡",products:120,rating:"4.7",sales:"5.1k"},
+  {name:"Nana's Naturals",cat:"Beauty & Health",icon:"🌿",products:45,rating:"5.0",sales:"2.8k"},
+  {name:"Artisan Furniture Co.",cat:"Home & Living",icon:"🪵",products:22,rating:"4.6",sales:"0.9k"},
+  {name:"Heritage Crafts GH",cat:"Art & Crafts",icon:"🎨",products:60,rating:"4.8",sales:"1.7k"},
+];
+const MAP_SELLERS = [
+  {name:"Mama Adwoa's Farm",type:"Food",lat:5.614,lng:-0.201,dist:"0.3km"},
+  {name:"Kente Queen Designs",type:"Fashion",lat:5.617,lng:-0.205,dist:"0.7km"},
+  {name:"TechHub Accra",type:"Electronics",lat:5.610,lng:-0.198,dist:"1.1km"},
+  {name:"Nana's Naturals",type:"Beauty",lat:5.619,lng:-0.210,dist:"0.5km"},
+  {name:"Heritage Crafts",type:"Crafts",lat:5.612,lng:-0.215,dist:"0.9km"},
+  {name:"Green Valley Farm",type:"Food",lat:5.605,lng:-0.208,dist:"1.8km"},
+];
+ 
+/* ══ STATE ══ */
+let cart = [], activeCat = 'all', currentUser = null, selectedRole = 'buyer';
+let sellerListings = [
+  {name:"Fresh Tomatoes",cat:"Food & Grocery",price:12,stock:50,delivery:"Both",status:"active"},
+  {name:"Garden Eggs",cat:"Food & Grocery",price:8,stock:30,delivery:"Pickup Only",status:"active"},
+  {name:"Palm Oil (1L)",cat:"Food & Grocery",price:22,stock:15,delivery:"Delivery Available",status:"pending"},
+];
+ 
+/* ══ Firebase callbacks (called from the module) ══ */
+window.NM.onLogin = function(user) {
+  currentUser = user;
+  updateNav(user);
+  // Only auto-navigate on page load (refresh) — manual sign in/up handle their own redirect
+  if (!window._manualAuth) {
+    // Came from a page refresh while already logged in — just update nav, stay on current page
+    if (document.getElementById('page-sell').classList.contains('active')) {
+      showPage('sell');
+    }
+  }
+  window._manualAuth = false;
+};
+ 
+window.NM.onLogout = function() {
+  currentUser = null;
+  document.getElementById('navActions').innerHTML = `
+    <button class="btn btn-ghost" onclick="showPage('signin')">Sign In</button>
+    <button class="btn btn-primary" onclick="showPage('signup')">Create Account</button>
+    <div class="cart-btn" onclick="toggleCart()">🛒 Cart<span class="cart-badge" id="cartBadge">0</span></div>`;
+};
+ 
+/* ══ NAV ══ */
+function updateNav(user) {
+  const isS = user.role === 'seller';
+  const initials = user.name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
+  const roleColor = isS ? 'var(--accent2)' : 'var(--accent)';
+  const roleLabel = isS ? '🏪 Seller' : '🛍️ Buyer';
+  document.getElementById('navActions').innerHTML = `
+    <div class="user-chip" onclick="toggleUserDropdown()" id="userChip">
+      <div class="u-avatar" style="background:${roleColor};color:#000;font-size:.75rem;font-weight:900;">${initials}</div>
+      <div style="display:flex;flex-direction:column;line-height:1.2;">
+        <span style="font-size:.82rem;font-weight:700;">${user.name.split(' ')[0]}</span>
+        <span style="font-size:.65rem;color:var(--muted);">${roleLabel}</span>
+      </div>
+      <span style="color:var(--muted);font-size:.75rem;margin-left:2px;">▾</span>
+    </div>
+    ${isS ? `<button class="btn btn-primary" onclick="showPage('sell')">📊 Dashboard</button>`
+           : `<button class="btn btn-ghost" style="font-size:.82rem;" onclick="showPage('sell')">🏪 Start Selling</button>`}
+    <button class="btn btn-ghost" style="font-size:.82rem;padding:8px 14px;" onclick="doSignOut()">Sign Out</button>
+    <div class="cart-btn" onclick="toggleCart()">🛒 Cart<span class="cart-badge" id="cartBadge">${cart.reduce((s,x)=>s+x.qty,0)}</span></div>`;
+ 
+  // User dropdown
+  const dropHtml = `
+    <div id="userDropdown" style="display:none;position:fixed;top:64px;right:20px;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:8px;min-width:220px;z-index:500;box-shadow:0 16px 48px rgba(0,0,0,.5);">
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border);margin-bottom:6px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="width:42px;height:42px;border-radius:50%;background:${roleColor};display:flex;align-items:center;justify-content:center;font-size:1rem;font-weight:900;color:#000;flex-shrink:0;">${initials}</div>
+          <div>
+            <div style="font-weight:700;font-size:.9rem;">${user.name}</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-top:1px;">${user.email}</div>
+            <div style="font-size:.7rem;color:${roleColor};margin-top:2px;">${roleLabel}</div>
+          </div>
+        </div>
+      </div>
+      <button onclick="closeDropdown();toast('Profile settings coming soon!','success')" style="width:100%;padding:9px 14px;background:none;border:none;color:var(--text);font-family:var(--fb);font-size:.85rem;cursor:pointer;text-align:left;border-radius:10px;transition:background .15s;" onmouseover="this.style.background='var(--card)'" onmouseout="this.style.background='none'">👤 My Profile</button>
+      <button onclick="closeDropdown();toast('My orders coming soon!','success')" style="width:100%;padding:9px 14px;background:none;border:none;color:var(--text);font-family:var(--fb);font-size:.85rem;cursor:pointer;text-align:left;border-radius:10px;transition:background .15s;" onmouseover="this.style.background='var(--card)'" onmouseout="this.style.background='none'">📦 My Orders</button>
+      ${isS ? `<button onclick="closeDropdown();showPage('sell')" style="width:100%;padding:9px 14px;background:none;border:none;color:var(--text);font-family:var(--fb);font-size:.85rem;cursor:pointer;text-align:left;border-radius:10px;transition:background .15s;" onmouseover="this.style.background='var(--card)'" onmouseout="this.style.background='none'">📊 Seller Dashboard</button>` : ''}
+      <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px;">
+        <button onclick="closeDropdown();doSignOut()" style="width:100%;padding:9px 14px;background:none;border:none;color:var(--danger);font-family:var(--fb);font-size:.85rem;cursor:pointer;text-align:left;border-radius:10px;transition:background .15s;" onmouseover="this.style.background='rgba(255,95,109,.08)'" onmouseout="this.style.background='none'">🚪 Sign Out</button>
+      </div>
+    </div>`;
+  // Remove old dropdown if exists
+  const old = document.getElementById('userDropdown');
+  if(old) old.remove();
+  document.body.insertAdjacentHTML('beforeend', dropHtml);
+}
+ 
+function toggleUserDropdown() {
+  const dd = document.getElementById('userDropdown');
+  if(!dd) return;
+  dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
+}
+function closeDropdown() {
+  const dd = document.getElementById('userDropdown');
+  if(dd) dd.style.display = 'none';
+}
+// Close dropdown on outside click
+document.addEventListener('click', function(e) {
+  const chip = document.getElementById('userChip');
+  const dd   = document.getElementById('userDropdown');
+  if(dd && chip && !chip.contains(e.target) && !dd.contains(e.target)) {
+    dd.style.display = 'none';
+  }
+});
+ 
+/* ══ PAGE ROUTER ══ */
+function showPage(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + id).classList.add('active');
+  window.scrollTo(0, 0);
+  document.querySelectorAll('.nav-links a').forEach(a => a.classList.remove('active'));
+  const nm = {home:'navHome',signin:'navHome',signup:'navHome',sell:'navSell'};
+  if(nm[id]) document.getElementById(nm[id]).classList.add('active');
+  if(id === 'sell') {
+    if(currentUser && currentUser.role === 'seller') {
+      document.getElementById('sellLanding').style.display = 'none';
+      document.getElementById('sellDashboard').style.display = 'block';
+      document.getElementById('dashWelcome').textContent = 'Welcome back, ' + currentUser.name + '! 👋';
+      renderListings();
+    } else {
+      document.getElementById('sellLanding').style.display = 'block';
+      document.getElementById('sellDashboard').style.display = 'none';
+    }
+  }
+  if(id === 'home') renderProducts(PRODUCTS);
+}
+ 
+function goTo(target) {
+  showPage('home');
+  setTimeout(() => {
+    const el = target === 'map' ? document.getElementById('mapSection') : document.getElementById('sellersSection');
+    if(el) el.scrollIntoView({behavior:'smooth'});
+  }, 100);
+}
+ 
+/* ══ PRODUCTS ══ */
+function renderProducts(list) {
+  document.getElementById('productGrid').innerHTML = list.map(p => `
+    <div class="pcard">
+      <div class="pimg">${p.icon}</div>
+      <div class="pinfo">
+        <div class="pcat">${p.cat}</div>
+        <div class="pname">${p.name}</div>
+        <div class="pseller"><span class="sdot"></span>${p.seller} · ${p.dist}</div>
+        <div class="pfooter">
+          <div><div class="pprice">GH₵ ${p.price}</div><div class="prating">${p.rating}</div></div>
+          <button class="add-btn" onclick="addToCart(${p.id})">+ Add</button>
+        </div>
+      </div>
+    </div>`).join('');
+}
+function filterCat(cat, el) {
+  activeCat = cat;
+  document.querySelectorAll('.cat-pill').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  applyFilters();
+}
+function filterProducts() { applyFilters(); }
+function applyFilters() {
+  const q = (document.getElementById('searchInput').value || '').toLowerCase();
+  let list = PRODUCTS;
+  if(activeCat !== 'all') list = list.filter(p => p.cat === activeCat);
+  if(q) list = list.filter(p => p.name.toLowerCase().includes(q) || p.seller.toLowerCase().includes(q));
+  renderProducts(list);
+}
+function renderSellers() {
+  const cols = ['#f5a623','#3de8a0','#6c63ff','#ff5f6d','#38bdf8','#a78bfa'];
+  document.getElementById('sellersGrid').innerHTML = SELLERS.map((s,i) => `
+    <div class="sbig">
+      <div class="savatar" style="background:${cols[i]}22">${s.icon}</div>
+      <div class="sbig-name">${s.name}</div>
+      <div class="sbig-cat">${s.cat}</div>
+      <div class="srow">
+        <div class="sst"><strong>${s.products}</strong>Products</div>
+        <div class="sst"><strong>${s.rating} ★</strong>Rating</div>
+        <div class="sst"><strong>${s.sales}</strong>Sales</div>
+      </div>
+      <div class="verified">✅ Verified Seller</div>
+    </div>`).join('');
+}
+ 
+/* ══ MAP ══ */
+function initMap() {
+  const map = L.map('map').setView([5.614, -0.205], 14);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {attribution:'© OpenStreetMap © CARTO', maxZoom:19}).addTo(map);
+  const icon = L.divIcon({className:'', html:`<div style="background:#f5a623;border-radius:50%;width:14px;height:14px;border:2px solid #fff;box-shadow:0 0 8px rgba(245,166,35,.8)"></div>`, iconSize:[14,14]});
+  MAP_SELLERS.forEach(s => L.marker([s.lat,s.lng],{icon}).addTo(map).bindPopup(`<b style="color:#f5a623">${s.name}</b><br>${s.type} · ${s.dist} away`));
+  document.getElementById('sellerList').innerHTML = MAP_SELLERS.map(s => `
+    <div class="sc"><div class="sc-name">${s.name}</div><div class="sc-type">${s.type}</div><div class="sc-dist">📍 ${s.dist} away</div></div>`).join('');
+}
+ 
+/* ══ AUTH ══ */
+function cap(s){ return s ? s.charAt(0).toUpperCase()+s.slice(1) : ''; }
+ 
+function selectRole(role) {
+  selectedRole = role;
+  document.getElementById('roleBuyer').classList.toggle('active', role === 'buyer');
+  document.getElementById('roleSeller').classList.toggle('active', role === 'seller');
+  const sf = document.getElementById('sellerFields');
+  if(sf) sf.style.display = role === 'seller' ? 'block' : 'none';
+  hideErr('suErr');
+}
+ 
+function toggleVis(id, btn) {
+  const inp = document.getElementById(id);
+  if(!inp) return;
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+  btn.textContent = inp.type === 'password' ? '👁' : '🙈';
+}
+ 
+function checkStrength(val) {
+  const fill = document.getElementById('sbFill');
+  const hint = document.getElementById('sbHint');
+  if(!fill || !hint) return;
+  let sc = 0;
+  if(val.length >= 8) sc++;
+  if(/[A-Z]/.test(val)) sc++;
+  if(/[0-9]/.test(val)) sc++;
+  if(/[^A-Za-z0-9]/.test(val)) sc++;
+  const cls = ['','#ff5f6d','#f5a623','#38bdf8','#3de8a0'];
+  const lbl = ['','Weak — add uppercase & numbers','Fair — add a special character','Good password','Strong password 💪'];
+  fill.style.width = (sc*25)+'%'; fill.style.background = cls[sc]||'var(--border)';
+  hint.textContent = val.length ? lbl[sc] : 'Enter a password';
+  hint.style.color = cls[sc]||'var(--muted)';
+}
+ 
+function showErr(id, msg) {
+  const el = document.getElementById(id);
+  if(!el){ toast(msg,'error'); return; }
+  el.textContent = '⚠️  ' + msg; el.style.display = 'block';
+  el.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function hideErr(id) { const el=document.getElementById(id); if(el) el.style.display='none'; }
+ 
+async function doSignIn() {
+  hideErr('siErr');
+  const email = (document.getElementById('siEmail').value||'').trim();
+  const pass  = document.getElementById('siPass').value;
+  if(!email || !pass){ showErr('siErr','Please fill in all fields.'); return; }
+  const btn = document.getElementById('siBtn');
+  btn.textContent = 'Signing in…'; btn.disabled = true;
+  try {
+    const result = await window.NM.signIn(email, pass);
+    window._manualAuth = true;
+    toast('Welcome back, ' + result.name.split(' ')[0] + '! 👋', 'success');
+    showPage('home');
+    showWelcomeBanner(result.name, 'back');
+  } catch(e) {
+    showErr('siErr', window.NM.fbErr ? window.NM.fbErr(e.code) : e.message);
+  } finally {
+    btn.textContent = 'Sign In →'; btn.disabled = false;
+  }
+}
+ 
+async function doGoogleSignIn() {
+  try {
+    const result = await window.NM.googleSignIn();
+    window._manualAuth = true;
+    toast('Signed in with Google! 👋', 'success');
+    showPage('home');
+    showWelcomeBanner(result.name, 'back');
+  } catch(e) {
+    const msg = window.NM.fbErr ? window.NM.fbErr(e.code) : e.message;
+    if(e.code !== 'auth/popup-closed-by-user') toast(msg, 'error');
+  }
+}
+ 
+async function doSignUp() {
+  hideErr('suErr');
+  const first = (document.getElementById('suFirst').value||'').trim();
+  const last  = (document.getElementById('suLast').value||'').trim();
+  const email = (document.getElementById('suEmail').value||'').trim();
+  const phone = (document.getElementById('suPhone').value||'').trim();
+  const pass  = document.getElementById('suPass').value;
+  const conf  = document.getElementById('suConf').value;
+ 
+  if(!first)  { showErr('suErr','First name is required.');         document.getElementById('suFirst').focus(); return; }
+  if(!last)   { showErr('suErr','Last name is required.');          document.getElementById('suLast').focus();  return; }
+  if(!email)  { showErr('suErr','Email address is required.');      document.getElementById('suEmail').focus(); return; }
+  if(!email.includes('@')||!email.includes('.')) { showErr('suErr','Enter a valid email address.'); document.getElementById('suEmail').focus(); return; }
+  if(!phone)  { showErr('suErr','Phone number is required.');       document.getElementById('suPhone').focus(); return; }
+ 
+  if(selectedRole === 'seller') {
+    const shop = (document.getElementById('suShop').value||'').trim();
+    const scat = (document.getElementById('suCat').value||'').trim();
+    const sloc = (document.getElementById('suLoc').value||'').trim();
+    if(!shop){ showErr('suErr','Please enter your shop name.'); document.getElementById('suShop').focus(); return; }
+    if(!scat){ showErr('suErr','Please select your product category.'); return; }
+    if(!sloc){ showErr('suErr','Please enter your location.'); document.getElementById('suLoc').focus(); return; }
+  }
+ 
+  if(!pass)        { showErr('suErr','Password is required.');                  document.getElementById('suPass').focus(); return; }
+  if(pass.length<8){ showErr('suErr','Password must be at least 8 characters.'); document.getElementById('suPass').focus(); return; }
+  if(!conf)        { showErr('suErr','Please confirm your password.');           document.getElementById('suConf').focus(); return; }
+  if(pass !== conf){ showErr('suErr','Passwords do not match.');                 document.getElementById('suConf').focus(); return; }
+ 
+  const btn = document.getElementById('suBtn');
+  btn.textContent = 'Creating account…'; btn.disabled = true;
+  try {
+    const profileData = { name: first+' '+last, firstName:first, lastName:last, email, phone, role:selectedRole };
+    if(selectedRole === 'seller'){
+      profileData.shopName = document.getElementById('suShop').value.trim();
+      profileData.category = document.getElementById('suCat').value.trim();
+      profileData.location = document.getElementById('suLoc').value.trim();
+    }
+    await window.NM.signUp(email, pass, profileData);
+    toast('Account created! Welcome, ' + first + '! 🎉', 'success');
+    ['suFirst','suLast','suEmail','suPhone','suPass','suConf','suShop','suLoc'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+    const catEl=document.getElementById('suCat'); if(catEl) catEl.selectedIndex=0;
+    const fill=document.getElementById('sbFill'); if(fill) fill.style.width='0';
+    const hint=document.getElementById('sbHint'); if(hint) hint.textContent='Enter a password';
+    window._manualAuth = true;
+    showPage('home');
+    showWelcomeBanner(first + ' ' + last, 'new');
+  } catch(e) {
+    showErr('suErr', window.NM.fbErr ? window.NM.fbErr(e.code) : e.message);
+  } finally {
+    btn.textContent = 'Create Account →'; btn.disabled = false;
+  }
+}
+ 
+async function doSignOut() {
+  try {
+    await window.NM.signOut();
+    cart = []; updateCartUI();
+    toast('Signed out successfully 👋', 'success');
+    const wb = document.getElementById('welcomeBanner'); if(wb) wb.style.display='none';
+    showPage('home');
+  } catch(e) { toast('Sign out failed. Try again.', 'error'); }
+}
+ 
+/* ══ WELCOME BANNER ══ */
+function showWelcomeBanner(name, type) {
+  const banner = document.getElementById('welcomeBanner');
+  const avatar = document.getElementById('wbAvatar');
+  const title  = document.getElementById('wbTitle');
+  const sub    = document.getElementById('wbSub');
+  const badge  = document.getElementById('wbBadge');
+  if(!banner) return;
+ 
+  const initials = name.split(' ').map(w => w.charAt(0).toUpperCase()).slice(0,2).join('');
+  const role     = currentUser ? currentUser.role : 'buyer';
+  const greeting = type === 'new' ? 'Welcome to NearMart, ' + name.split(' ')[0] + '! 🎉'
+                                  : 'Welcome back, ' + name.split(' ')[0] + '! 👋';
+  const subText  = type === 'new'
+    ? 'Your account is ready. Start exploring local products around you.'
+    : 'Great to see you again. Your cart and saved items are waiting.';
+ 
+  avatar.textContent = initials;
+  title.textContent  = greeting;
+  sub.textContent    = subText;
+ 
+  if(role === 'seller') {
+    badge.textContent = '🏪 Verified Seller';
+    badge.style.background = 'rgba(61,232,160,.15)';
+    badge.style.color = 'var(--accent2)';
+    badge.style.border = '1px solid rgba(61,232,160,.3)';
+  } else {
+    badge.textContent = '🛍️ Buyer Account';
+    badge.style.background = 'rgba(245,166,35,.12)';
+    badge.style.color = 'var(--accent)';
+    badge.style.border = '1px solid rgba(245,166,35,.3)';
+  }
+ 
+  banner.style.display = 'block';
+  banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+ 
+  // Auto-hide after 8 seconds
+  setTimeout(() => { if(banner) banner.style.display = 'none'; }, 8000);
+}
+ 
+/* ══ CART ══ */
+function addToCart(id) {
+  const p = PRODUCTS.find(x => x.id === id);
+  const ex = cart.find(x => x.id === id);
+  if(ex) ex.qty++; else cart.push({...p, qty:1});
+  updateCartUI();
+  const b = document.getElementById('cartBadge');
+  if(b){ b.style.transform='scale(1.6)'; setTimeout(()=>b.style.transform='scale(1)',200); }
+  toast(p.icon + ' ' + p.name + ' added to cart', 'success');
+}
+function removeFromCart(id) { cart = cart.filter(x => x.id !== id); updateCartUI(); }
+function updateCartUI() {
+  const total = cart.reduce((s,x) => s+x.price*x.qty, 0);
+  const b = document.getElementById('cartBadge');
+  if(b) b.textContent = cart.reduce((s,x) => s+x.qty, 0);
+  const ie = document.getElementById('cartItems');
+  const te = document.getElementById('cartTotal');
+  const ce = document.getElementById('checkoutBtn');
+  if(!ie) return;
+  if(cart.length === 0) {
+    ie.innerHTML = `<div class="empty-cart"><div>🛒</div>Your cart is empty</div>`;
+    te.style.display='none'; ce.style.display='none';
+  } else {
+    ie.innerHTML = cart.map(x => `
+      <div class="ci">
+        <div class="ci-icon">${x.icon}</div>
+        <div><div class="ci-name">${x.name} ×${x.qty}</div><div class="ci-price">GH₵ ${(x.price*x.qty).toFixed(2)}</div></div>
+        <button class="ci-rm" onclick="removeFromCart(${x.id})">🗑</button>
+      </div>`).join('');
+    te.style.display='flex'; ce.style.display='block';
+    document.getElementById('totalPrice').textContent = 'GH₵ ' + total.toFixed(2);
+  }
+}
+function toggleCart() { document.getElementById('cartOverlay').classList.toggle('open'); updateCartUI(); }
+ 
+/* ══ PAYMENT ══ */
+let payMethod = 'card';
+const PAY_FIELDS = {
+  card:`<div class="fg"><label class="fl">Card Number</label><input class="fi" placeholder="1234 5678 9012 3456"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div class="fg"><label class="fl">Expiry</label><input class="fi" placeholder="MM / YY"></div>
+          <div class="fg"><label class="fl">CVV</label><input class="fi" placeholder="•••"></div>
+        </div>
+        <div class="fg"><label class="fl">Name on Card</label><input class="fi" placeholder="Full Name"></div>`,
+  momo:`<div class="fg"><label class="fl">Mobile Number</label><input class="fi" placeholder="024 000 0000"></div>
+        <div class="fg"><label class="fl">Network</label><input class="fi" placeholder="MTN / Vodafone / AirtelTigo"></div>`,
+  cash:`<div style="padding:16px;background:var(--card);border-radius:10px;border:1px solid var(--border)"><div style="font-size:1.5rem;margin-bottom:8px">💵</div><div style="font-weight:600;margin-bottom:4px">Cash on Delivery</div><div style="color:var(--muted);font-size:.82rem">Pay when the seller delivers. Please have the exact amount ready.</div></div>`
+};
+function selectPay(el, m) {
+  payMethod = m;
+  document.querySelectorAll('.pay-m').forEach(x => x.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('payFields').innerHTML = PAY_FIELDS[m];
+}
+function openPayment() {
+  document.getElementById('cartOverlay').classList.remove('open');
+  document.getElementById('payOverlay').style.display = 'flex';
+  document.getElementById('payPanel').innerHTML = `
+    <div class="pay-title">Complete Payment 💳</div>
+    <div class="pay-sub">Total: <strong style="color:var(--accent)">${document.getElementById('totalPrice').textContent}</strong></div>
+    <div class="pay-methods">
+      <div class="pay-m active" onclick="selectPay(this,'card')"><span class="pm-icon">💳</span>Card</div>
+      <div class="pay-m" onclick="selectPay(this,'momo')"><span class="pm-icon">📱</span>MoMo</div>
+      <div class="pay-m" onclick="selectPay(this,'cash')"><span class="pm-icon">💵</span>Cash</div>
+    </div>
+    <div id="payFields">${PAY_FIELDS['card']}</div>
+    <div class="pay-actions">
+      <button class="btn btn-ghost" onclick="closePayment()" style="flex:1;padding:12px">Cancel</button>
+      <button class="btn btn-primary" onclick="processPayment()" style="flex:2;padding:12px;font-weight:800">Pay Now</button>
+    </div>`;
+}
+function closePayment() { document.getElementById('payOverlay').style.display = 'none'; }
+function processPayment() {
+  document.getElementById('payPanel').innerHTML = `
+    <div class="ok-msg">
+      <div class="ok-icon">🎉</div>
+      <div class="ok-title">Order Placed!</div>
+      <div class="ok-sub">Payment successful.<br>The seller will contact you shortly.</div>
+      <button class="btn btn-primary" style="margin-top:20px;padding:12px 28px" onclick="closePayment();cart=[];updateCartUI()">Continue Shopping</button>
+    </div>`;
+}
+ 
+/* ══ SELLER DASHBOARD ══ */
+function toggleListingForm() {
+  const w = document.getElementById('listingFormWrap');
+  w.style.display = w.style.display === 'none' ? 'block' : 'none';
+}
+function submitListing() {
+  const name = document.getElementById('lpName').value.trim();
+  const cat  = document.getElementById('lpCat').value;
+  const price= document.getElementById('lpPrice').value;
+  const stock= document.getElementById('lpStock').value;
+  const del  = document.getElementById('lpDelivery').value;
+  if(!name||!price||!stock){ toast('Please fill in all product fields','error'); return; }
+  sellerListings.unshift({name,cat,price:parseFloat(price),stock:parseInt(stock),delivery:del,status:'pending'});
+  renderListings();
+  document.getElementById('listingFormWrap').style.display = 'none';
+  ['lpName','lpPrice','lpStock'].forEach(id=>{ document.getElementById(id).value=''; });
+  toast('✅ Product submitted for review!', 'success');
+}
+function renderListings() {
+  document.getElementById('listingBody').innerHTML = sellerListings.map((l,i) => `
+    <tr>
+      <td style="font-weight:600">${l.name}</td>
+      <td style="color:var(--muted)">${l.cat}</td>
+      <td style="color:var(--accent);font-weight:700">GH₵ ${l.price}</td>
+      <td>${l.stock}</td>
+      <td style="color:var(--muted);font-size:.8rem">${l.delivery}</td>
+      <td><span class="sp ${l.status==='active'?'sp-a':'sp-p'}">${l.status==='active'?'✅ Active':'⏳ Pending'}</span></td>
+      <td><button class="act-btn" onclick="removeListing(${i})">🗑 Remove</button></td>
+    </tr>`).join('');
+  const lc = document.getElementById('listingCount');
+  if(lc) lc.textContent = sellerListings.filter(l=>l.status==='active').length;
+}
+function removeListing(i) { sellerListings.splice(i,1); renderListings(); toast('Listing removed','success'); }
+ 
+/* ══ TOAST ══ */
+function toast(msg, type='success') {
+  const el = document.getElementById('toastEl');
+  el.textContent = msg; el.className = 'toast ' + type;
+  void el.offsetWidth; el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 3200);
+}
+ 
+/* ══ INIT ══ */
+renderProducts(PRODUCTS);
+renderSellers();
+initMap();
+updateCartUI();
+</script>
+</body>
+</html>
